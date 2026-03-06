@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ma Pointeuse Transport</title>
+    <style>
+        :root { --primary: #3498db; --success: #2ecc71; --danger: #e74c3c; --bg: #f8f9fa; --dark: #34495e; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); display: flex; flex-direction: column; align-items: center; padding: 20px; color: #333; }
+        
+        /* Style des cartes d'origine */
+        .card { background: white; padding: 1.5rem; border-radius: 15px; box-shadow: 0 8px 20px rgba(0,0,0,0.08); width: 100%; max-width: 480px; margin-bottom: 20px; box-sizing: border-box; }
+        
+        /* Zone Chrono & Vitesse */
+        .header-info { text-align: center; margin-bottom: 20px; }
+        #speedDisp { font-size: 0.9rem; color: #7f8c8d; font-weight: bold; }
+        #liveChrono { font-size: 2.8rem; font-weight: bold; color: var(--dark); display: block; margin: 5px 0; }
+        #activityLabel { text-transform: uppercase; font-size: 0.8rem; letter-spacing: 1px; color: var(--primary); font-weight: bold; }
+
+        .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px; }
+        .stat-box { background: #fff; padding: 12px; border-radius: 10px; border: 1px solid #eee; text-align: center; }
+        .stat-box span { display: block; font-size: 0.75rem; color: #7f8c8d; text-transform: uppercase; margin-bottom: 5px; }
+        .stat-box strong { font-size: 1.2rem; color: var(--dark); }
+
+        /* Boutons d'origine */
+        .grid-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        button { padding: 15px; font-size: 15px; border: none; border-radius: 10px; cursor: pointer; transition: 0.2s; font-weight: bold; color: white; }
+        button:active { transform: scale(0.98); }
+        
+        .btn-gps { grid-column: span 2; background: var(--dark); margin-bottom: 5px; }
+        .btn-rest { background: #f1c40f; color: #333; }
+        .btn-stop { background: var(--danger); }
+        .btn-export { grid-column: span 2; background: var(--success); margin-top: 15px; font-size: 16px; }
+
+        /* Alerte 4h30 */
+        .alert-red { color: var(--danger) !important; animation: blink 1s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9rem; }
+        td { padding: 12px 5px; border-bottom: 1px solid #f1f1f1; }
+        .tag { padding: 3px 7px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
+        .tag-CONDUITE { background: #e8f4fd; color: #2980b9; }
+        .tag-TRAVAIL { background: #f4e8ff; color: #8e44ad; }
+        .tag-REPOS { background: #fff9e6; color: #d4a017; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <div class="header-info">
+        <div id="speedDisp">0 km/h</div>
+        <span id="activityLabel">ARRÊT</span>
+        <span id="liveChrono">00:00:00</span>
+        <div id="autoStatus" style="font-size: 0.7rem; color: #999;">Auto-détection désactivée</div>
+    </div>
+    
+    <div class="stats">
+        <div class="stat-box">
+            <span>Conduite (4h30)</span>
+            <strong id="driveTotal">0h 00</strong>
+        </div>
+        <div class="stat-box">
+            <span>Travail (Quai)</span>
+            <strong id="workTotal">0h 00</strong>
+        </div>
+    </div>
+
+    <div class="grid-buttons">
+        <button class="btn-gps" id="gpsToggle" onclick="toggleAutoMode()">🛰️ ACTIVER MODE AUTOMATIQUE</button>
+        <button class="btn-rest" onclick="manualAction('REPOS')">☕ REPOS</button>
+        <button class="btn-stop" onclick="manualAction('FIN DE SERVICE')">🏁 FIN</button>
+        <button class="btn-export" onclick="exportCSV()">📥 RAPPORT MENSUEL (CSV)</button>
+    </div>
+</div>
+
+<div class="card">
+    <h3 style="margin: 0 0 10px 0; font-size: 1.1rem;">Historique du jour</h3>
+    <table id="logTable">
+        <tbody id="logBody"></tbody>
+    </table>
+</div>
+
+<script>
+    let logs = JSON.parse(localStorage.getItem('truckLogs') || '[]');
+    let gpsId = null;
+    let stopTimeout = null;
+    let timerInterval = null;
+    let audioCtx = null;
+
+    // Hack iPhone : Son silencieux
+    function startSilence() {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            gain.gain.value = 0.001;
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start();
+        } else if (audioCtx.state === 'suspended') { audioCtx.resume(); }
+    }
+
+    function addEntry(type) {
+        const now = new Date();
+        if (logs.length > 0 && logs[0].type === type) return;
+        logs.unshift({ timestamp: now.getTime(), time: now.toLocaleTimeString('fr-FR'), date: now.toLocaleDateString('fr-FR'), type: type });
+        localStorage.setItem('truckLogs', JSON.stringify(logs));
+        updateInterface();
+    }
+
+    function toggleAutoMode() {
+        const btn = document.getElementById('gpsToggle');
+        if (gpsId === null) {
+            startSilence();
+            gpsId = navigator.geolocation.watchPosition(handleMotion, null, { enableHighAccuracy: true });
+            btn.innerText = "🛑 COUPER L'AUTO";
+            document.getElementById('autoStatus').innerText = "Surveillance active (Anti-veille iPhone)";
+        } else {
+            navigator.geolocation.clearWatch(gpsId);
+            gpsId = null;
+            if (audioCtx) audioCtx.suspend();
+            btn.innerText = "🛰️ ACTIVER MODE AUTOMATIQUE";
+            document.getElementById('autoStatus').innerText = "Auto-détection désactivée";
+        }
+    }
+
+    function handleMotion(pos) {
+        const speed = (pos.coords.speed * 3.6) || 0;
+        document.getElementById('speedDisp').innerText = Math.round(speed) + " km/h";
+        if (speed >= 10) {
+            if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
+            addEntry("CONDUITE");
+        } else if (speed < 2) {
+            if (logs.length > 0 && logs[0].type === "CONDUITE" && !stopTimeout) {
+                stopTimeout = setTimeout(() => { addEntry("TRAVAIL (ARRÊT)"); stopTimeout = null; }, 120000); 
+            }
+        }
+    }
+
+    function manualAction(type) {
+        if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
+        addEntry(type);
+    }
+
+    function updateInterface() {
+        const body = document.getElementById('logBody');
+        let dMins = 0; let wMins = 0;
+        const today = new Date().toLocaleDateString('fr-FR');
+
+        body.innerHTML = logs.filter(l => l.date === today).slice(0, 5).map(l => `
+            <tr><td><b>${l.time}</b></td><td style="text-align:right"><span class="tag tag-${l.type.split(' ')[0]}">${l.type}</span></td></tr>
+        `).join('');
+
+        for (let i = 0; i < logs.length - 1; i++) {
+            if (logs[i].date !== today) continue;
+            let diff = (logs[i].timestamp - logs[i+1].timestamp) / 60000;
+            if (logs[i+1].type === "CONDUITE") dMins += diff;
+            if (logs[i+1].type.includes("TRAVAIL")) wMins += diff;
+        }
+
+        document.getElementById('driveTotal').innerText = `${Math.floor(dMins/60)}h ${(Math.floor(dMins%60)).toString().padStart(2, '0')}`;
+        document.getElementById('workTotal').innerText = `${Math.floor(wMins/60)}h ${(Math.floor(wMins%60)).toString().padStart(2, '0')}`;
+
+        if (dMins >= 270) document.getElementById('driveTotal').classList.add('alert-red');
+        else document.getElementById('driveTotal').classList.remove('alert-red');
+
+        clearInterval(timerInterval);
+        if (logs.length > 0 && logs[0].type !== "FIN DE SERVICE") {
+            document.getElementById('activityLabel').innerText = logs[0].type;
+            timerInterval = setInterval(() => {
+                const elapsed = new Date().getTime() - logs[0].timestamp;
+                const h = Math.floor(elapsed / 3600000);
+                const m = Math.floor((elapsed % 3600000) / 60000);
+                const s = Math.floor((elapsed % 60000) / 1000);
+                document.getElementById('liveChrono').innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+    }
+
+    function exportCSV() {
+        let csv = "Date;Heure;Activite\n" + logs.map(l => `${l.date};${l.time};${l.type}`).join("\n");
+        const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "rapport_mensuel_chauffeur.csv";
+        link.click();
+    }
+    updateInterface();
+</script>
+</body>
+</html>
